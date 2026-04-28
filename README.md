@@ -1,36 +1,66 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Investment Autopilot Frontend
 
-## Getting Started
+Frontend dashboard for Investment Autopilot, an AI-powered market intelligence and trade-planning system for Indian and US markets.
 
-First, run the development server:
+## Live Deployments
+
+- Frontend (Vercel): https://frontend-rho-cyan-1g2hzgp9vm.vercel.app
+- Backend API (Vercel): https://backend-phi-lyart-72.vercel.app
+- Backend health check: https://backend-phi-lyart-72.vercel.app/api/status
+
+## Key Features
+
+- India/US market dashboard with agent run status and scheduling context.
+- AI recommendations with confidence, risk level, rationale, catalysts, and risks.
+- Execution Playbook:
+	- Capital-aware position sizing
+	- Risk budget guardrails
+	- Regime-aware adjustments (auto or manual override)
+- Portfolio Mode:
+	- Add and persist positions in browser storage
+	- Live mark-to-market PnL
+	- Stop-loss breach and target-hit alerts
+
+## Local Development
+
+### Prerequisites
+
+- Node.js 20+
+- Backend API running locally on port 8000 (or set a custom API URL)
+
+### Install
+
+```bash
+npm install
+```
+
+### Environment
+
+Create `.env.local` in `frontend/`:
+
+```bash
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+For production deployments, set `NEXT_PUBLIC_API_URL` to your public backend URL.
+
+### Run
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Deployment Notes
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- Frontend is deployed using Vercel.
+- Build-time environment variable required:
+	- `NEXT_PUBLIC_API_URL`
+- If backend URL changes, redeploy frontend with updated `NEXT_PUBLIC_API_URL`.
 
-## Learn More
+## Source of Truth Prompt
 
-To learn more about Next.js, take a look at the following resources:
+Project-level implementation and change guidance is maintained in:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `PROJECT_PROMPT.md`

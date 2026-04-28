@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { fetchDashboard, fetchStatus, triggerAgent } from "@/lib/api";
+import { evaluatePortfolio, fetchDashboard, fetchPlaybook, fetchStatus, triggerAgent } from "@/lib/api";
 
 /* ── Types (mirrors backend schemas) ─────────────────── */
 interface IndexData { symbol: string; name: string; current_value: number; change: number; change_percent: number; }
@@ -23,6 +23,86 @@ interface AgentReport {
   stocks_analyzed: number; news_articles_processed: number; errors: string[];
 }
 interface DashboardData { india: AgentReport | null; us: AgentReport | null; next_india_run: string | null; next_us_run: string | null; }
+interface PlaybookPick {
+  symbol: string;
+  name: string;
+  recommendation: string;
+  risk_level: string;
+  confidence: number;
+  composite_score: number;
+  entry_price: number;
+  stop_loss: number | null;
+  target_price_1: number | null;
+  potential_upside: number | null;
+  risk_per_share: number | null;
+  position_size_shares: number;
+  capital_required: number;
+  max_loss_at_stop: number;
+  reward_to_risk: number | null;
+  thesis: string;
+}
+interface PlaybookData {
+  market: string;
+  date: string;
+  capital: number;
+  risk_percent_per_trade: number;
+  effective_risk_percent_per_trade?: number;
+  max_positions: number;
+  effective_max_positions?: number;
+  regime?: {
+    mode: string;
+    source: string;
+    reason: string;
+    risk_multiplier: number;
+    position_multiplier: number;
+  };
+  guardrails: {
+    risk_budget_per_trade?: number;
+    total_capital_deployed?: number;
+    capital_utilization_percent?: number;
+    total_worst_case_loss?: number;
+    warnings?: string[];
+  };
+  picks: PlaybookPick[];
+}
+interface PortfolioPosition {
+  symbol: string;
+  quantity: number;
+  entry_price: number;
+  stop_loss?: number;
+  target_price?: number;
+}
+interface PortfolioEvaluatedPosition {
+  symbol: string;
+  name: string;
+  quantity: number;
+  entry_price: number;
+  live_price: number;
+  stop_loss: number | null;
+  target_price: number | null;
+  invested: number;
+  current_value: number;
+  unrealized_pnl: number;
+  unrealized_pnl_percent: number;
+  stop_distance_percent: number | null;
+  target_distance_percent: number | null;
+  status: string;
+  currency: string;
+}
+interface PortfolioEvaluation {
+  market: string;
+  generated_at: string;
+  summary: {
+    positions_count: number;
+    invested_capital: number;
+    current_value: number;
+    unrealized_pnl: number;
+    unrealized_pnl_percent: number;
+    risk_alerts: number;
+  };
+  positions: PortfolioEvaluatedPosition[];
+  alerts: string[];
+}
 
 /* ── Helper Components ───────────────────────────────── */
 
@@ -74,6 +154,18 @@ export default function Dashboard() {
   const [triggering, setTriggering] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [statusPoll, setStatusPoll] = useState(0);
+  const [capital, setCapital] = useState(200000);
+  const [riskPercent, setRiskPercent] = useState(1);
+  const [maxPositions, setMaxPositions] = useState(5);
+  const [autoRegime, setAutoRegime] = useState(true);
+  const [regimeOverride, setRegimeOverride] = useState<"aggressive" | "balanced" | "defensive">("balanced");
+  const [playbook, setPlaybook] = useState<PlaybookData | null>(null);
+  const [playbookLoading, setPlaybookLoading] = useState(false);
+  const [portfolioPositions, setPortfolioPositions] = useState<PortfolioPosition[]>([
+    { symbol: "RELIANCE.NS", quantity: 20, entry_price: 2950, stop_loss: 2875, target_price: 3080 },
+  ]);
+  const [portfolioEval, setPortfolioEval] = useState<PortfolioEvaluation | null>(null);
+  const [portfolioLoading, setPortfolioLoading] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -84,6 +176,52 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  const loadPlaybook = useCallback(async () => {
+    setPlaybookLoading(true);
+    try {
+      const pb = await fetchPlaybook(market, capital, riskPercent, maxPositions, autoRegime, regimeOverride);
+      if (pb) setPlaybook(pb as PlaybookData);
+    } catch {
+      // Ignore transient API failures for playbook.
+    } finally {
+      setPlaybookLoading(false);
+    }
+  }, [autoRegime, capital, market, maxPositions, regimeOverride, riskPercent]);
+
+  useEffect(() => {
+    loadPlaybook();
+  }, [loadPlaybook]);
+
+  useEffect(() => {
+    const key = `portfolio-positions-${market}`;
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw) as PortfolioPosition[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setPortfolioPositions(parsed);
+          return;
+        }
+      }
+      setPortfolioPositions(
+        market === "india"
+          ? [{ symbol: "RELIANCE.NS", quantity: 20, entry_price: 2950, stop_loss: 2875, target_price: 3080 }]
+          : [{ symbol: "AAPL", quantity: 10, entry_price: 180, stop_loss: 172, target_price: 195 }],
+      );
+    } catch {
+      // Ignore localStorage parse issues.
+    }
+  }, [market]);
+
+  useEffect(() => {
+    const key = `portfolio-positions-${market}`;
+    try {
+      localStorage.setItem(key, JSON.stringify(portfolioPositions));
+    } catch {
+      // Ignore localStorage write issues.
+    }
+  }, [market, portfolioPositions]);
 
   // Poll while agent is running
   useEffect(() => {
@@ -107,6 +245,32 @@ export default function Dashboard() {
     try { await triggerAgent(m); } catch { /* */ }
     setTimeout(() => { setTriggering(false); loadData(); }, 2000);
   };
+
+  const evaluateCurrentPortfolio = useCallback(async () => {
+    setPortfolioLoading(true);
+    try {
+      const sanitized = portfolioPositions
+        .filter((p) => p.symbol && p.quantity > 0 && p.entry_price > 0)
+        .map((p) => ({
+          symbol: p.symbol.trim(),
+          quantity: p.quantity,
+          entry_price: p.entry_price,
+          stop_loss: p.stop_loss ?? null,
+          target_price: p.target_price ?? null,
+        }));
+
+      const result = await evaluatePortfolio({ market, positions: sanitized });
+      if (result) setPortfolioEval(result as PortfolioEvaluation);
+    } catch {
+      // Ignore transient API failures.
+    } finally {
+      setPortfolioLoading(false);
+    }
+  }, [market, portfolioPositions]);
+
+  useEffect(() => {
+    evaluateCurrentPortfolio();
+  }, [evaluateCurrentPortfolio]);
 
   const report = market === "india" ? data?.india : data?.us;
   const overview = report?.overview;
@@ -187,6 +351,220 @@ export default function Dashboard() {
         )}
 
         {/* Recommendations */}
+        <section style={{ marginBottom: 28 }}>
+          <div className="section-header">
+            <h2 className="section-title">⚙️ Execution Playbook</h2>
+            <span className="section-subtitle">Capital-aware sizing with risk guardrails</span>
+          </div>
+
+          <div className="glass-card" style={{ padding: 18, marginBottom: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(120px, 1fr))", gap: 10 }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                Capital
+                <input
+                  type="number"
+                  min={10000}
+                  value={capital}
+                  onChange={(e) => setCapital(Number(e.target.value || 0))}
+                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-primary)", padding: "8px 10px" }}
+                />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                Risk % / Trade
+                <input
+                  type="number"
+                  min={0.25}
+                  max={5}
+                  step={0.25}
+                  value={riskPercent}
+                  onChange={(e) => setRiskPercent(Number(e.target.value || 0))}
+                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-primary)", padding: "8px 10px" }}
+                />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                Max Positions
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={maxPositions}
+                  onChange={(e) => setMaxPositions(Number(e.target.value || 1))}
+                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-primary)", padding: "8px 10px" }}
+                />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                Regime Mode
+                <select
+                  value={autoRegime ? "auto" : regimeOverride}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === "auto") {
+                      setAutoRegime(true);
+                    } else {
+                      setAutoRegime(false);
+                      setRegimeOverride(v as "aggressive" | "balanced" | "defensive");
+                    }
+                  }}
+                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-primary)", padding: "8px 10px" }}
+                >
+                  <option value="auto">Auto</option>
+                  <option value="aggressive">Aggressive</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="defensive">Defensive</option>
+                </select>
+              </label>
+              <div style={{ display: "flex", alignItems: "end" }}>
+                <button className="btn btn-primary" onClick={loadPlaybook} disabled={playbookLoading}>
+                  {playbookLoading ? "Refreshing..." : "Refresh Playbook"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {playbook && (
+            <>
+              {playbook.regime && (
+                <div className="glass-card" style={{ padding: "12px 16px", marginBottom: 12, fontSize: "0.8rem", color: "var(--text-secondary)", borderColor: "rgba(99, 102, 241, 0.35)" }}>
+                  <strong style={{ color: "var(--text-primary)" }}>Regime: {playbook.regime.mode.toUpperCase()}</strong>
+                  <span style={{ marginLeft: 10 }}>Source: {playbook.regime.source}</span>
+                  <span style={{ marginLeft: 10 }}>Reason: {playbook.regime.reason}</span>
+                </div>
+              )}
+
+              <div className="glass-card" style={{ padding: "14px 18px", marginBottom: 14, display: "flex", flexWrap: "wrap", gap: 16, fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                <span>Risk budget/trade: <strong style={{ color: "var(--text-primary)" }}>{Number(playbook.guardrails?.risk_budget_per_trade ?? 0).toLocaleString()}</strong></span>
+                <span>Capital deployed: <strong style={{ color: "var(--text-primary)" }}>{Number(playbook.guardrails?.total_capital_deployed ?? 0).toLocaleString()}</strong></span>
+                <span>Utilization: <strong style={{ color: "var(--text-primary)" }}>{Number(playbook.guardrails?.capital_utilization_percent ?? 0).toFixed(1)}%</strong></span>
+                <span>Worst-case loss: <strong style={{ color: "var(--accent-rose)" }}>{Number(playbook.guardrails?.total_worst_case_loss ?? 0).toLocaleString()}</strong></span>
+                <span>Effective risk %: <strong style={{ color: "var(--text-primary)" }}>{Number(playbook.effective_risk_percent_per_trade ?? playbook.risk_percent_per_trade).toFixed(2)}%</strong></span>
+                <span>Effective positions: <strong style={{ color: "var(--text-primary)" }}>{playbook.effective_max_positions ?? playbook.max_positions}</strong></span>
+              </div>
+
+              {(playbook.guardrails?.warnings ?? []).length > 0 && (
+                <div className="glass-card" style={{ padding: 14, marginBottom: 14, borderColor: "rgba(245, 158, 11, 0.4)" }}>
+                  <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--accent-amber)", marginBottom: 8 }}>Risk Warnings</div>
+                  <ul style={{ paddingLeft: 16, margin: 0, color: "var(--text-secondary)", fontSize: "0.8rem" }}>
+                    {(playbook.guardrails?.warnings ?? []).map((w, i) => <li key={i}>{w}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {(playbook.picks ?? []).length > 0 && (
+                <div className="grid-2" style={{ marginBottom: 8 }}>
+                  {(playbook.picks ?? []).map((pick) => (
+                    <div key={pick.symbol} className="glass-card" style={{ padding: 16 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                        <div>
+                          <div style={{ fontWeight: 700 }}>{pick.symbol.replace(".NS", "")}</div>
+                          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{pick.name}</div>
+                        </div>
+                        <RecBadge type={pick.recommendation} />
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: "0.8rem" }}>
+                        <div>Entry: <strong>{pick.entry_price.toLocaleString()}</strong></div>
+                        <div>Stop: <strong>{pick.stop_loss?.toLocaleString() || "—"}</strong></div>
+                        <div>Target: <strong>{pick.target_price_1?.toLocaleString() || "—"}</strong></div>
+                        <div>Qty: <strong>{pick.position_size_shares.toLocaleString()}</strong></div>
+                        <div>Capital: <strong>{pick.capital_required.toLocaleString()}</strong></div>
+                        <div>Max Loss: <strong style={{ color: "var(--accent-rose)" }}>{pick.max_loss_at_stop.toLocaleString()}</strong></div>
+                        <div>R:R: <strong>{pick.reward_to_risk || "—"}</strong></div>
+                        <div>Confidence: <strong>{pick.confidence.toFixed(0)}</strong></div>
+                      </div>
+                      <div style={{ marginTop: 10, color: "var(--text-secondary)", fontSize: "0.78rem", lineHeight: 1.45 }}>
+                        {pick.thesis}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </section>
+
+        <section style={{ marginBottom: 28 }}>
+          <div className="section-header">
+            <h2 className="section-title">📂 Portfolio Monitor</h2>
+            <span className="section-subtitle">Live PnL, stop/target breach alerts, and position health</span>
+          </div>
+
+          <div className="glass-card" style={{ padding: 16, marginBottom: 12 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+              <button
+                className="btn"
+                onClick={() => setPortfolioPositions((prev) => [...prev, {
+                  symbol: market === "india" ? "TCS.NS" : "MSFT",
+                  quantity: 1,
+                  entry_price: 1,
+                }])}
+              >
+                + Add Position
+              </button>
+              <button className="btn btn-primary" onClick={evaluateCurrentPortfolio} disabled={portfolioLoading}>
+                {portfolioLoading ? "Evaluating..." : "Evaluate Portfolio"}
+              </button>
+            </div>
+
+            {portfolioPositions.map((p, i) => (
+              <div key={`${p.symbol}-${i}`} style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr auto", gap: 8, marginBottom: 8 }}>
+                <input value={p.symbol} onChange={(e) => setPortfolioPositions((prev) => prev.map((row, idx) => idx === i ? { ...row, symbol: e.target.value } : row))}
+                  placeholder={market === "india" ? "RELIANCE.NS" : "AAPL"}
+                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-primary)", padding: "8px 10px" }} />
+                <input type="number" value={p.quantity} onChange={(e) => setPortfolioPositions((prev) => prev.map((row, idx) => idx === i ? { ...row, quantity: Number(e.target.value || 0) } : row))}
+                  placeholder="Qty"
+                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-primary)", padding: "8px 10px" }} />
+                <input type="number" value={p.entry_price} onChange={(e) => setPortfolioPositions((prev) => prev.map((row, idx) => idx === i ? { ...row, entry_price: Number(e.target.value || 0) } : row))}
+                  placeholder="Entry"
+                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-primary)", padding: "8px 10px" }} />
+                <input type="number" value={p.stop_loss ?? ""} onChange={(e) => setPortfolioPositions((prev) => prev.map((row, idx) => idx === i ? { ...row, stop_loss: e.target.value ? Number(e.target.value) : undefined } : row))}
+                  placeholder="Stop"
+                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-primary)", padding: "8px 10px" }} />
+                <input type="number" value={p.target_price ?? ""} onChange={(e) => setPortfolioPositions((prev) => prev.map((row, idx) => idx === i ? { ...row, target_price: e.target.value ? Number(e.target.value) : undefined } : row))}
+                  placeholder="Target"
+                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-primary)", padding: "8px 10px" }} />
+                <button className="btn" onClick={() => setPortfolioPositions((prev) => prev.filter((_, idx) => idx !== i))}>Remove</button>
+              </div>
+            ))}
+          </div>
+
+          {portfolioEval && (
+            <>
+              <div className="glass-card" style={{ padding: "14px 18px", marginBottom: 12, display: "flex", flexWrap: "wrap", gap: 16, fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                <span>Invested: <strong style={{ color: "var(--text-primary)" }}>{portfolioEval.summary.invested_capital.toLocaleString()}</strong></span>
+                <span>Current value: <strong style={{ color: "var(--text-primary)" }}>{portfolioEval.summary.current_value.toLocaleString()}</strong></span>
+                <span>PnL: <strong style={{ color: portfolioEval.summary.unrealized_pnl >= 0 ? "var(--accent-emerald)" : "var(--accent-rose)" }}>{portfolioEval.summary.unrealized_pnl.toLocaleString()} ({portfolioEval.summary.unrealized_pnl_percent.toFixed(2)}%)</strong></span>
+                <span>Risk alerts: <strong style={{ color: portfolioEval.summary.risk_alerts > 0 ? "var(--accent-rose)" : "var(--text-primary)" }}>{portfolioEval.summary.risk_alerts}</strong></span>
+              </div>
+
+              {(portfolioEval.alerts ?? []).length > 0 && (
+                <div className="glass-card" style={{ padding: 14, marginBottom: 12, borderColor: "rgba(244, 63, 94, 0.45)" }}>
+                  <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--accent-rose)", marginBottom: 8 }}>Portfolio Alerts</div>
+                  <ul style={{ paddingLeft: 16, margin: 0, color: "var(--text-secondary)", fontSize: "0.82rem" }}>
+                    {(portfolioEval.alerts ?? []).map((a, i) => <li key={i}>{a}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              <div className="glass-card" style={{ overflow: "hidden" }}>
+                {(portfolioEval.positions ?? []).map((pos) => (
+                  <div key={pos.symbol} className="news-item" style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr 1fr 1fr", gap: 8, alignItems: "center" }}>
+                    <div>
+                      <div style={{ fontWeight: 700 }}>{pos.symbol.replace(".NS", "")}</div>
+                      <div style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>{pos.name}</div>
+                    </div>
+                    <div style={{ fontSize: "0.78rem" }}>Entry/LTP: <strong>{pos.entry_price} / {pos.live_price}</strong></div>
+                    <div style={{ fontSize: "0.78rem" }}>Qty: <strong>{pos.quantity}</strong></div>
+                    <div style={{ fontSize: "0.78rem" }}>PnL: <strong style={{ color: pos.unrealized_pnl >= 0 ? "var(--accent-emerald)" : "var(--accent-rose)" }}>{pos.unrealized_pnl.toFixed(2)} ({pos.unrealized_pnl_percent.toFixed(2)}%)</strong></div>
+                    <div style={{ fontSize: "0.78rem" }}>Stop dist: <strong>{pos.stop_distance_percent != null ? `${pos.stop_distance_percent.toFixed(2)}%` : "—"}</strong></div>
+                    <div>
+                      <span className={`badge ${pos.status === "stop_breach" ? "badge-sell" : pos.status === "target_hit" ? "badge-buy" : "badge-neutral"}`}>{pos.status.replace("_", " ")}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </section>
+
         <section style={{ marginBottom: 28 }}>
           <div className="section-header">
             <h2 className="section-title">🎯 Top Recommendations</h2>
